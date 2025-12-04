@@ -21,6 +21,8 @@ A high-performance HTTP1.1 Web application framework based on libuv
 | keep_alive_requests | Number | 0 | 单个长连接允许处理的最大请求数，0表示不限制 |
 | worker_processes | Number | CPU核心数量 | 工作进程数，默认按CPU核心数分配 |
 | max_header_size | Number | 0 | 请求头最大允许大小（单位：字节），超出则拒绝请求，0表示不限制 |
+| max_body_size | Number | 0 | 请求体最大允许大小（单位：字节），超出则拒绝请求，0表示不限制 |
+| read_buffer_size | Number | 8192 | 读取缓冲区大小（单位：字节），超出会动态扩容，建议根据服务器负载调整 |
 | listen_backlog | Number | 1024 | 连接队列的最大长度 |
 
 ### 路由方法
