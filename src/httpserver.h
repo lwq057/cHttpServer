@@ -28,6 +28,8 @@ typedef struct {
     size_t keep_alive_requests;
     size_t worker_processes;
     size_t max_header_size;
+    size_t max_body_size;
+    size_t read_buffer_size;
     int listen_backlog;
 } http_server_options_t;
 
