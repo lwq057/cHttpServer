@@ -1,6 +1,14 @@
 # qHttpServer
 A high-performance HTTP1.1 Web application framework based on libuv
 
+- 高性能
+- 轻量
+
+---
+
+## 依赖要求
+- libuv 库（>= 1.0.0）
+
 ---
 
 ### httpServer(opt)
