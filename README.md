@@ -56,8 +56,8 @@ A high-performance HTTP1.1 Web application framework based on libuv
 | res->writeRaw(chunk,len) | chunk：二进制/字符串数据；len:字节整形,数据长度 | 零拷贝，流式写入响应体，需确保chunk在写入之前不修改销毁，异常给予警告 |
 | res->end(chunk,len) | chunk（可选）：二进制/字符串/空；len:字节整形,数据长度 | 结束响应，res->write之后使用res->end结束或补充最后chunk并结束 |
 | res->close() | - | 强制关闭响应连接，终止响应发送 |
-| res->cork_start(res) | res | 启用cork，优化小数据包的批量发送场景 |
-| res->cork_end(res) | res | 解用cork，提交 cork 期间的写请求 |
+| res->cork_start() | - | 启用cork，优化小数据包的批量发送场景 |
+| res->cork_end() | - | 解用cork，提交 cork 期间的写请求 |
 | res->cork(cb) | 回调函数(res,req) | 回调使用cork |
 
 ### req
