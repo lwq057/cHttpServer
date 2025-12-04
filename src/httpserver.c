@@ -4,10 +4,66 @@
 #include <string.h>
 #include <ctype.h>
 #include <httpserver.h>
+#ifdef _WIN32
+#include <iphlpapi.h>
+#include <ws2tcpip.h>
+#endif
 
 static http_server_t* g_server_current = NULL;
 static http_req_t* g_req_current = NULL;
 static http_res_t* g_res_current = NULL;
+static struct { int family; char ip[64]; unsigned mtu; }* g_mtu_cache = NULL;
+static size_t g_mtu_len = 0; static size_t g_mtu_cap = 0;
+static unsigned mtu_cache_get(int family, const char* ip){ for(size_t i=0;i<g_mtu_len;i++){ if(g_mtu_cache[i].family==family && strcmp(g_mtu_cache[i].ip,ip)==0) return g_mtu_cache[i].mtu; } return 0; }
+static void mtu_cache_put(int family, const char* ip, unsigned mtu){ if(!ip||!*ip||mtu==0) return; if(g_mtu_len==g_mtu_cap){ size_t nc=g_mtu_cap?g_mtu_cap*2:16; g_mtu_cache=(void*)realloc(g_mtu_cache,nc*sizeof(*g_mtu_cache)); g_mtu_cap=nc; } size_t i; for(i=0;i<g_mtu_len;i++){ if(g_mtu_cache[i].family==family && strcmp(g_mtu_cache[i].ip,ip)==0){ g_mtu_cache[i].mtu=mtu; return; } } strncpy(g_mtu_cache[g_mtu_len].ip, ip, sizeof(g_mtu_cache[g_mtu_len].ip)-1); g_mtu_cache[g_mtu_len].ip[sizeof(g_mtu_cache[g_mtu_len].ip)-1]='\0'; g_mtu_cache[g_mtu_len].family=family; g_mtu_cache[g_mtu_len].mtu=mtu; g_mtu_len++; }
+
+static unsigned windows_mtu_for_sockaddr(const struct sockaddr_storage* ss){
+#ifdef _WIN32
+    ULONG sz = 15 * 1024; IP_ADAPTER_ADDRESSES* addrs = (IP_ADAPTER_ADDRESSES*)malloc(sz);
+    ULONG r = GetAdaptersAddresses(ss->ss_family, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, NULL, addrs, &sz);
+    if (r == ERROR_BUFFER_OVERFLOW) { addrs = (IP_ADAPTER_ADDRESSES*)realloc(addrs, sz); r = GetAdaptersAddresses(ss->ss_family, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, NULL, addrs, &sz); }
+    unsigned mtu = 0;
+    if (r == NO_ERROR) {
+        IP_ADAPTER_ADDRESSES* a = addrs;
+        while (a) {
+            IP_ADAPTER_UNICAST_ADDRESS* u = a->FirstUnicastAddress;
+            while (u) {
+                if (ss->ss_family == AF_INET) {
+                    const struct sockaddr_in* s = (const struct sockaddr_in*)ss;
+                    const struct sockaddr_in* iu = (const struct sockaddr_in*)u->Address.lpSockaddr;
+                    if (iu->sin_family == AF_INET && iu->sin_addr.S_un.S_addr == s->sin_addr.S_un.S_addr) { mtu = a->Mtu; break; }
+                } else if (ss->ss_family == AF_INET6) {
+                    const struct sockaddr_in6* s6 = (const struct sockaddr_in6*)ss;
+                    const struct sockaddr_in6* iu6 = (const struct sockaddr_in6*)u->Address.lpSockaddr;
+                    if (iu6->sin6_family == AF_INET6 && memcmp(&iu6->sin6_addr, &s6->sin6_addr, sizeof(struct in6_addr)) == 0) { mtu = a->Mtu; break; }
+                }
+                u = u->Next;
+            }
+            if (mtu) break;
+            a = a->Next;
+        }
+    }
+    free(addrs);
+    return mtu;
+#else
+    (void)ss; return 0;
+#endif
+}
+
+static size_t compute_cork_limit_for_handle(uv_tcp_t* h){
+    struct sockaddr_storage ss; int sl = sizeof(ss);
+    size_t def = 1460;
+    if (uv_tcp_getsockname(h, (struct sockaddr*)&ss, &sl) == 0) {
+        unsigned mtu = 0; char ipbuf[64]; ipbuf[0] = '\0';
+        if (ss.ss_family == AF_INET) { struct sockaddr_in* a = (struct sockaddr_in*)&ss; uv_ip4_name(a, ipbuf, sizeof(ipbuf)); }
+        else if (ss.ss_family == AF_INET6) { struct sockaddr_in6* a6 = (struct sockaddr_in6*)&ss; uv_ip6_name(a6, ipbuf, sizeof(ipbuf)); }
+        mtu = mtu_cache_get(ss.ss_family, ipbuf);
+        if (mtu == 0) { mtu = windows_mtu_for_sockaddr(&ss); if (mtu) mtu_cache_put(ss.ss_family, ipbuf, mtu); }
+        if (ss.ss_family == AF_INET) { size_t resv = 40; def = mtu > resv ? (size_t)(mtu - resv) : 1460; }
+        else if (ss.ss_family == AF_INET6) { size_t resv = 60; def = mtu > resv ? (size_t)(mtu - resv) : 1440; }
+    }
+    return def;
+}
 
 #define MAX_METHOD_LEN 16
 #define MAX_VERSION_LEN 16
@@ -114,7 +170,6 @@ typedef struct http_conn {
     unsigned short tryWriteWindow;
     unsigned method_mask;
 } http_conn;
-
 
 static void header_list_init(header_list* hl) {
     hl->items = NULL;
@@ -242,7 +297,8 @@ static void cork_reset(http_res_t* res) {
     if (res->cork_dyn_ptrs) { free(res->cork_dyn_ptrs); res->cork_dyn_ptrs = NULL; }
     res->cork_count = res->cork_cap = 0;
     res->cork_dyn_count = res->cork_dyn_cap = 0;
-    res->cork_bytes = 0; res->cork_limit = 64 * 1024;
+    res->cork_bytes = 0;
+    res->cork_limit = compute_cork_limit_for_handle(&res->conn->handle);
 }
 
 static void cork_ensure_bufs(http_res_t* res, int need) {
@@ -758,7 +814,7 @@ static void res_init_from_conn(http_res_t* res, http_conn* c) {
     res->cork_dyn_count = 0;
     res->cork_dyn_cap = 0;
     res->cork_bytes = 0;
-    res->cork_limit = 64 * 1024;
+    res->cork_limit = compute_cork_limit_for_handle(&c->handle);
     res->writeStatus = res_writeStatus_noctx;
     res->writeHeader = res_writeHeader_noctx;
     res->removeHeader = res_removeHeader_noctx;
@@ -862,6 +918,18 @@ static void on_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
         if (te && strcmp(te, STR_CHUNKED) == 0) c->body_mode = BODY_CHUNKED;
         else if (cl) { c->body_mode = BODY_LENGTH; c->content_length = (size_t)strtoull(cl, NULL, 10); }
         else c->body_mode = BODY_NONE;
+        if (c->server->opt.max_body_size && c->body_mode == BODY_LENGTH && c->content_length > c->server->opt.max_body_size) {
+            http_req_t* req = (http_req_t*)malloc(sizeof(http_req_t));
+            http_res_t* res = (http_res_t*)malloc(sizeof(http_res_t));
+            req_init_from_conn(req, c); res_init_from_conn(res, c);
+            c->current_req = req; c->current_res = res;
+            g_server_current = c->server; g_req_current = req; g_res_current = res;
+            res_writeStatus(res, 413, "Payload Too Large");
+            const char* body = "Payload Too Large";
+            res_end(res, (const unsigned char*)body, strlen(body));
+            c->readbuf_used = 0;
+            return;
+        }
         dispatch_request(c);
         size_t body_avail = len - (size_t)(hdr_end - data);
         {
@@ -874,21 +942,40 @@ static void on_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
                     if (c->onBody && c->current_req && c->current_res) { g_server_current = c->server; g_req_current = c->current_req; g_res_current = c->current_res; c->onBody(c->current_req, c->current_res, (unsigned char*)data + body_pos, take, last); }
                 }
                 c->body_read += take;
+                if (c->server->opt.max_body_size && c->body_read > c->server->opt.max_body_size) {
+                    res_writeStatus(c->current_res, 413, "Payload Too Large");
+                    const char* body = "Payload Too Large";
+                    res_end(c->current_res, (const unsigned char*)body, strlen(body));
+                    c->readbuf_used = 0; return;
+                }
                 if (c->body_read == c->content_length) { c->readbuf_used = 0; return; }
             } else if (c->body_mode == BODY_CHUNKED) {
                 size_t pos = body_pos;
                 while (pos + 1 < len) {
                     const char* nl = (const char*)memchr(data + pos, '\n', len - pos);
                     if (!nl) break;
-                    size_t sl = (size_t)(nl - (data + pos)); if (sl && data[pos+sl-1]=='\r') sl--;
-                    char* szbuf = str_dup_range(data + pos, sl);
-                    size_t chunk_len = (size_t)strtoull(szbuf, NULL, 16);
-                    free(szbuf);
-                    pos += sl + 2;
-                    if (chunk_len == 0) { if (c->onBody && c->current_req && c->current_res) c->onBody(c->current_req, c->current_res, NULL, 0, 1); c->readbuf_used = 0; return; }
-                    if (pos + chunk_len + 2 > len) break;
-                    if (c->onBody && c->current_req && c->current_res) { g_server_current = c->server; g_req_current = c->current_req; g_res_current = c->current_res; c->onBody(c->current_req, c->current_res, (unsigned char*)data + pos, chunk_len, 0); }
-                    pos += chunk_len + 2;
+                size_t sl = (size_t)(nl - (data + pos)); if (sl && data[pos+sl-1]=='\r') sl--;
+                char* szbuf = str_dup_range(data + pos, sl);
+                size_t chunk_len = (size_t)strtoull(szbuf, NULL, 16);
+                free(szbuf);
+                pos += sl + 2;
+                if (c->server->opt.max_body_size && c->body_read + chunk_len > c->server->opt.max_body_size) {
+                    http_req_t* req = c->current_req ? c->current_req : (http_req_t*)malloc(sizeof(http_req_t));
+                    http_res_t* res = c->current_res ? c->current_res : (http_res_t*)malloc(sizeof(http_res_t));
+                    if (!c->current_req) { req_init_from_conn(req, c); c->current_req = req; }
+                    if (!c->current_res) { res_init_from_conn(res, c); c->current_res = res; }
+                    g_server_current = c->server; g_req_current = c->current_req; g_res_current = c->current_res;
+                    res_writeStatus(c->current_res, 413, "Payload Too Large");
+                    const char* body = "Payload Too Large";
+                    res_end(c->current_res, (const unsigned char*)body, strlen(body));
+                    c->readbuf_used = 0;
+                    return;
+                }
+                if (chunk_len == 0) { if (c->onBody && c->current_req && c->current_res) c->onBody(c->current_req, c->current_res, NULL, 0, 1); c->readbuf_used = 0; return; }
+                if (pos + chunk_len + 2 > len) break;
+                if (c->onBody && c->current_req && c->current_res) { g_server_current = c->server; g_req_current = c->current_req; g_res_current = c->current_res; c->onBody(c->current_req, c->current_res, (unsigned char*)data + pos, chunk_len, 0); }
+                pos += chunk_len + 2;
+                
                 }
             }
         }
@@ -926,7 +1013,7 @@ static void on_connection(uv_stream_t* server, int status) {
     http_server_t* s = (http_server_t*)server->data;
     http_conn* c = (http_conn*)calloc(1, sizeof(http_conn));
     c->loop = (uv_loop_t*)s->loop; c->server = s; c->closed = 0; header_list_init(&c->headers);
-    c->readbuf_size = 64 * 1024; c->readbuf = (char*)malloc(c->readbuf_size); c->readbuf_used = 0;
+    c->readbuf_size = s->opt.read_buffer_size ? s->opt.read_buffer_size : 8192; c->readbuf = (char*)malloc(c->readbuf_size); c->readbuf_used = 0;
     uv_tcp_init((uv_loop_t*)s->loop, &c->handle);
     c->handle.data = c;
     {
@@ -967,6 +1054,7 @@ http_server_t* httpServer(const http_server_options_t* opt) {
         size_t cores = (size_t)uv_available_parallelism();
         s->opt.worker_processes = cores ? cores : 1;
     }
+    if (s->opt.read_buffer_size == 0) s->opt.read_buffer_size = 8192;
     {
         uv_tcp_t* srv = (uv_tcp_t*)malloc(sizeof(uv_tcp_t));
         uv_tcp_init((uv_loop_t*)s->loop, srv);
@@ -1102,7 +1190,11 @@ void res_writeRaw(http_res_t* res, const unsigned char* chunk, size_t len) {
 }
 void res_end(http_res_t* res, const unsigned char* chunk, size_t len) { res_write_internal(res, chunk, len, 1); }
 void res_close(http_res_t* res) { uv_close((uv_handle_t*)&res->conn->handle, on_conn_closed); res->conn->closed=1; }
-void res_cork_start(http_res_t* res) { if (res->cork_scoped) { fprintf(stderr, "Warning: scoped cork active, start ignored\n"); return; } res->cork_manual = 1; if (!res->cork_limit) res->cork_limit = 64*1024; }
+void res_cork_start(http_res_t* res) {
+    if (res->cork_scoped) { fprintf(stderr, "Warning: scoped cork active, start ignored\n"); return; }
+    res->cork_manual = 1;
+    if (!res->cork_limit) res->cork_limit = compute_cork_limit_for_handle(&res->conn->handle);
+}
 void res_cork_end(http_res_t* res) {
     if (!res->cork_manual) return;
     res->cork_manual = 0;
