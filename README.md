@@ -53,7 +53,7 @@ A high-performance HTTP1.1 Web application framework based on libuv
 | res->writeHeader(key, value) | key：响应头名；value：响应头值 | 单个设置响应头 |
 | res->removeHeader(key) | key:移除的响应头key字符串 | 移除指定响应头,不存在或已传输返回false,返回布尔值true/false |
 | res->write(chunk,len) | chunk：二进制/字符串数据；len:字节整形,数据长度 | 流式写入响应体，调用后再执行writeStatus/writeHeader会忽略并输出警告 |
-| res_writeRaw(chunk,len) | chunk：二进制/字符串数据；len:字节整形,数据长度 | 零拷贝，流式写入响应体，需确保chunk在写入之前不修改销毁，异常给予警告 |
+| res->writeRaw(chunk,len) | chunk：二进制/字符串数据；len:字节整形,数据长度 | 零拷贝，流式写入响应体，需确保chunk在写入之前不修改销毁，异常给予警告 |
 | res->end(chunk,len) | chunk（可选）：二进制/字符串/空；len:字节整形,数据长度 | 结束响应，res->write之后使用res->end结束或补充最后chunk并结束 |
 | res->close() | - | 强制关闭响应连接，终止响应发送 |
 | res->cork_start(res) | res | 启用cork，优化小数据包的批量发送场景 |
