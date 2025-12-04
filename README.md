@@ -72,7 +72,7 @@ A high-performance HTTP1.1 Web application framework based on libuv
 | req->rawHeader | - | 只读，原始请求头，字符串 |
 | req->header | - | 只读，请求头，只读字典视图，所有键为小写；header_size(req->header) 返回项数 ；header_key(req->header, i) 返回第 i 条的键；header_value(req->header, i) 返回第 i 条的值 |
 | req->aborted | - | 动态，只读，连接是否已终止（布尔值：true/false） |
-| req->parameter | key：字符串，路由参数名 | 只读，获取key的路由参数值，字符串，空则返回空字符串 |
+| req->parameter | - | 只读，获取key的路由参数值，字符串，空则返回空字符串 |
 | req->getHeader(key) | key：字符串，请求头名 | 获取key的请求头值，字符串，空则返回空字符串，默认空 |
 | req->getQuery(key) | key：字符串，Query参数名 | 获取key的URL Query参数值，空则返回空字符串，默认空 |
 | req->getParameter(key) | key：字符串，路由参数名 | 获取路由参数（如`/user/:id`中的id的值），空则返回空字符串，默认空 |
