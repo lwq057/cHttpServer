@@ -18,7 +18,7 @@ static void hello_handler(http_req_t* req, http_res_t* res) {
     const char* id = req->getQuery("id");
     const int phase = res->writePhase;
     const char* raw = req->rawHeader;
-    res->writeHeader("server","Nginx/100861");
+    res->writeHeader("server","cHttpServer");
     res->removeHeader("x-custom");
     int n = snprintf(buf, sizeof(buf), "<meta charset=\"UTF-8\"><pre>Hello World！\n\nname:%s\nid:%s\nquery:%s\nurl:%s\npath:%s\nmethod:%s\naborted:%s\nremote_addr:%s\nua:%s\nphase:%d\n\nheaders:\n%s<pre>",name, id, query, url, path, method, aborted, remote_addr, ua, phase, raw ? raw : "");
     res->writeHeader("Content-Type", "text/html; charset=utf-8");
