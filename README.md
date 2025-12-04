@@ -1,2 +1,2 @@
 # qHttpServer
-http 1.1 server
+A high-performance HTTP1.1 Web application framework based on libuv
